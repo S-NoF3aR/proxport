@@ -111,4 +111,3 @@ WantedBy=multi-user.target
 - Make sure the host can route to the VM IP addresses.
 - This proxy supports both TCP and UDP forwarding.
 - UDP forwarding keeps temporary per-client sessions so reply packets from the VM are routed back to the correct internet client.
-- If you later want TLS termination, ACLs, or the Proxmox API for dynamic rule management, the app can be extended in that direction.
