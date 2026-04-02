@@ -233,7 +233,7 @@ func splitYAMLKeyValue(line string, lineNumber int) (string, string, error) {
 		return "", "", fmt.Errorf("line %d: empty key", lineNumber)
 	}
 
-	return key, unquoteYAMLValue(value), nil
+	return key, unquoteYAMLValue(stripYAMLInlineComment(value)), nil
 }
 
 func unquoteYAMLValue(value string) string {
@@ -244,6 +244,36 @@ func unquoteYAMLValue(value string) string {
 		}
 	}
 	return value
+}
+
+func stripYAMLInlineComment(value string) string {
+	var builder strings.Builder
+	inSingle := false
+	inDouble := false
+	escaped := false
+
+	for _, r := range value {
+		switch {
+		case escaped:
+			builder.WriteRune(r)
+			escaped = false
+		case inDouble && r == '\\':
+			builder.WriteRune(r)
+			escaped = true
+		case !inDouble && r == '\'':
+			inSingle = !inSingle
+			builder.WriteRune(r)
+		case !inSingle && r == '"':
+			inDouble = !inDouble
+			builder.WriteRune(r)
+		case !inSingle && !inDouble && r == '#':
+			return strings.TrimSpace(builder.String())
+		default:
+			builder.WriteRune(r)
+		}
+	}
+
+	return strings.TrimSpace(builder.String())
 }
 
 func assignConfigField(cfg *Config, key, value string, lineNumber int) error {
@@ -619,7 +649,10 @@ func targetAddress(rule ForwardRule) string {
 }
 
 func isClosedNetworkError(err error) bool {
-	return strings.Contains(strings.ToLower(err.Error()), "use of closed network connection")
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, net.ErrClosed) || strings.Contains(strings.ToLower(err.Error()), "use of closed network connection")
 }
 
 func cleanupUDPSessions(sessionsMu *sync.Mutex, sessions map[string]*udpSession) {
