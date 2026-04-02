@@ -32,6 +32,17 @@ For a Linux Proxmox host from another machine:
 GOOS=linux GOARCH=amd64 go build -o proxport ./cmd/proxport
 ```
 
+## Releases
+
+GitHub Actions builds release artifacts automatically when you push a tag that starts with `v`, for example:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Each release includes packaged binaries for Linux `amd64`, Linux `arm64`, and Windows `amd64`, plus a `checksums.txt` file.
+
 ## Config
 
 Copy `config.example.yaml` to `config.yaml` and adjust the VM addresses and ports.

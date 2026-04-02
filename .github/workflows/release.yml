@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${GITHUB_REF_NAME}"
+          mkdir -p dist
+
+          build_target() {
+            local goos="$1"
+            local goarch="$2"
+            local binary_name="proxport"
+            local asset_name="proxport_${VERSION}_${goos}_${goarch}"
+
+            if [ "$goos" = "windows" ]; then
+              binary_name="${binary_name}.exe"
+              asset_name="${asset_name}.zip"
+            else
+              asset_name="${asset_name}.tar.gz"
+            fi
+
+            rm -rf "build/${goos}_${goarch}"
+            mkdir -p "build/${goos}_${goarch}"
+            cp README.md config.example.yaml "build/${goos}_${goarch}/"
+
+            GOOS="$goos" GOARCH="$goarch" go build -o "build/${goos}_${goarch}/${binary_name}" ./cmd/proxport
+
+            if [ "$goos" = "windows" ]; then
+              (
+                cd "build/${goos}_${goarch}"
+                zip -qr "../../dist/${asset_name}" .
+              )
+            else
+              tar -C "build/${goos}_${goarch}" -czf "dist/${asset_name}" .
+            fi
+          }
+
+          build_target linux amd64
+          build_target linux arm64
+          build_target windows amd64
+
+          (
+            cd dist
+            sha256sum * > checksums.txt
+          )
+
+      - name: Create GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --generate-notes \
+            --title "${GITHUB_REF_NAME}"
