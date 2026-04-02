@@ -1,0 +1,18 @@
+listen_address: 0.0.0.0
+dial_timeout: 5s
+forwards:
+  - name: ssh-vm-101
+    protocol: tcp
+    listen_port: 2222
+    target_host: 192.168.100.101
+    target_port: 22
+  - name: https-vm-102
+    protocol: tcp
+    listen_port: 443
+    target_host: 192.168.100.102
+    target_port: 443
+  - name: game-vm-103
+    protocol: udp
+    listen_port: 27015
+    target_host: 192.168.100.103
+    target_port: 27015
