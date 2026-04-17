@@ -6,6 +6,7 @@
 
 - Listens on one or more TCP or UDP ports on the Proxmox host
 - Forwards each incoming connection to a configured VM IP and port
+- Can terminate TLS/HTTPS on the Proxmox host and forward plain TCP to a VM
 - Uses a simple YAML config file
 - Logs startup, connection failures, and disconnects
 - Shuts down cleanly on `SIGTERM` and `Ctrl+C`
@@ -58,6 +59,13 @@ forwards:
     listen_port: 2222
     target_host: 192.168.100.101
     target_port: 22
+  - name: https-vm-102
+    protocol: tcp
+    listen_port: 443
+    target_host: 192.168.100.102
+    target_port: 80
+    tls_cert_file: /etc/letsencrypt/live/example.com/fullchain.pem
+    tls_key_file: /etc/letsencrypt/live/example.com/privkey.pem
   - name: game-vm-103
     protocol: udp
     listen_port: 27015
@@ -74,6 +82,28 @@ Fields:
 - `forwards[].listen_port`: Public port opened on the Proxmox host
 - `forwards[].target_host`: VM IP address reachable from the host
 - `forwards[].target_port`: Port on the VM service
+- `forwards[].tls_cert_file`: Optional certificate chain file for TLS termination on TCP rules
+- `forwards[].tls_key_file`: Optional private key file for TLS termination on TCP rules
+
+## TLS termination
+
+For HTTPS termination, configure the public rule as TCP with certificate files on the Proxmox host. Clients connect to proxport using HTTPS, but proxport forwards decrypted plain HTTP/TCP traffic to the VM.
+
+Example:
+
+```yaml
+- name: app-https
+  protocol: tcp
+  listen_port: 443
+  target_host: 192.168.100.102
+  target_port: 80
+  tls_cert_file: /etc/letsencrypt/live/app.example.com/fullchain.pem
+  tls_key_file: /etc/letsencrypt/live/app.example.com/privkey.pem
+```
+
+TLS termination is only supported for TCP rules. The backend service does not need HTTPS in this setup.
+
+The proxport process must be able to read both certificate files. Certificates are loaded when the listener starts, so restart proxport after renewing or replacing a certificate.
 
 ## Run
 

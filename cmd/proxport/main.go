@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,11 +32,13 @@ type Config struct {
 }
 
 type ForwardRule struct {
-	Name       string `json:"name"`
-	Protocol   string `json:"protocol"`
-	ListenPort int    `json:"listen_port"`
-	TargetHost string `json:"target_host"`
-	TargetPort int    `json:"target_port"`
+	Name        string `json:"name"`
+	Protocol    string `json:"protocol"`
+	ListenPort  int    `json:"listen_port"`
+	TargetHost  string `json:"target_host"`
+	TargetPort  int    `json:"target_port"`
+	TLSCertFile string `json:"tls_cert_file"`
+	TLSKeyFile  string `json:"tls_key_file"`
 }
 
 type Duration struct {
@@ -135,7 +138,7 @@ func loadConfig(path string) (Config, error) {
 		cfg.DialTimeout.Duration = defaultDialTimeout
 	}
 
-	if err := validateConfig(cfg); err != nil {
+	if err := validateConfig(&cfg); err != nil {
 		return Config{}, err
 	}
 
@@ -282,6 +285,10 @@ func assignForwardField(rule *ForwardRule, key, value string, lineNumber int) er
 			return fmt.Errorf("line %d: invalid target_port %q", lineNumber, value)
 		}
 		rule.TargetPort = port
+	case "tls_cert_file":
+		rule.TLSCertFile = value
+	case "tls_key_file":
+		rule.TLSKeyFile = value
 	default:
 		return fmt.Errorf("line %d: unknown forward key %q", lineNumber, key)
 	}
@@ -296,7 +303,7 @@ func filepathExt(path string) string {
 	return path[lastDot:]
 }
 
-func validateConfig(cfg Config) error {
+func validateConfig(cfg *Config) error {
 	if ip := net.ParseIP(cfg.ListenAddress); ip == nil && cfg.ListenAddress != "0.0.0.0" && cfg.ListenAddress != "::" {
 		return fmt.Errorf("listen_address must be a valid IP, got %q", cfg.ListenAddress)
 	}
@@ -320,6 +327,15 @@ func validateConfig(cfg Config) error {
 		}
 		if net.ParseIP(rule.TargetHost) == nil {
 			return fmt.Errorf("forwards[%d].target_host must be a valid IP address", i)
+		}
+		if rule.hasTLS() && rule.Protocol != "tcp" {
+			return fmt.Errorf("forwards[%d] uses TLS termination, which is only supported for tcp rules", i)
+		}
+		if rule.TLSCertFile != "" && rule.TLSKeyFile == "" {
+			return fmt.Errorf("forwards[%d].tls_key_file is required when tls_cert_file is set", i)
+		}
+		if rule.TLSKeyFile != "" && rule.TLSCertFile == "" {
+			return fmt.Errorf("forwards[%d].tls_cert_file is required when tls_key_file is set", i)
 		}
 
 		portKey := fmt.Sprintf("%s:%d", rule.Protocol, rule.ListenPort)
@@ -377,13 +393,17 @@ func (a *App) Run(ctx context.Context) error {
 
 func (a *App) startTCPRule(ctx context.Context, rule ForwardRule) error {
 	addr := net.JoinHostPort(a.cfg.ListenAddress, strconv.Itoa(rule.ListenPort))
-	listener, err := net.Listen("tcp", addr)
+	listener, err := a.listenTCP(rule, addr)
 	if err != nil {
 		return fmt.Errorf("listen on %s for rule %q: %w", addr, displayName(rule), err)
 	}
 
 	a.listeners = append(a.listeners, listener)
-	a.logger.Printf("listening on tcp %s -> %s", listener.Addr(), targetAddress(rule))
+	if rule.hasTLS() {
+		a.logger.Printf("listening on tls %s -> %s", listener.Addr(), targetAddress(rule))
+	} else {
+		a.logger.Printf("listening on tcp %s -> %s", listener.Addr(), targetAddress(rule))
+	}
 
 	a.wg.Add(1)
 	go func() {
@@ -392,6 +412,22 @@ func (a *App) startTCPRule(ctx context.Context, rule ForwardRule) error {
 	}()
 
 	return nil
+}
+
+func (a *App) listenTCP(rule ForwardRule, addr string) (net.Listener, error) {
+	if !rule.hasTLS() {
+		return net.Listen("tcp", addr)
+	}
+
+	cert, err := tls.LoadX509KeyPair(rule.TLSCertFile, rule.TLSKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load TLS certificate/key: %w", err)
+	}
+
+	return tls.Listen("tcp", addr, &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	})
 }
 
 func (a *App) startUDPRule(ctx context.Context, rule ForwardRule) error {
@@ -612,6 +648,10 @@ func normalizedProtocol(value string) string {
 		return "tcp"
 	}
 	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func (rule ForwardRule) hasTLS() bool {
+	return rule.TLSCertFile != "" || rule.TLSKeyFile != ""
 }
 
 func targetAddress(rule ForwardRule) string {
