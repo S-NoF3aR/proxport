@@ -64,8 +64,7 @@ forwards:
     listen_port: 443
     target_host: 192.168.100.102
     target_port: 80
-    tls_cert_file: /etc/letsencrypt/live/example.com/fullchain.pem
-    tls_key_file: /etc/letsencrypt/live/example.com/privkey.pem
+    tls: true
   - name: game-vm-103
     protocol: udp
     listen_port: 27015
@@ -82,12 +81,18 @@ Fields:
 - `forwards[].listen_port`: Public port opened on the Proxmox host
 - `forwards[].target_host`: VM IP address reachable from the host
 - `forwards[].target_port`: Port on the VM service
-- `forwards[].tls_cert_file`: Optional certificate chain file for TLS termination on TCP rules
-- `forwards[].tls_key_file`: Optional private key file for TLS termination on TCP rules
+- `forwards[].tls`: Enables TLS termination on TCP rules
+- `forwards[].tls_cert_file`: Optional certificate chain override for TLS termination on TCP rules
+- `forwards[].tls_key_file`: Optional private key override for TLS termination on TCP rules
 
 ## TLS termination
 
-For HTTPS termination, configure the public rule as TCP with certificate files on the Proxmox host. Clients connect to proxport using HTTPS, but proxport forwards decrypted plain HTTP/TCP traffic to the VM.
+For HTTPS termination, configure the public rule as TCP and set `tls: true`. Clients connect to proxport using HTTPS, but proxport forwards decrypted plain HTTP/TCP traffic to the VM.
+
+By default, TLS rules use the Proxmox host certificate files:
+
+- Certificate: `/etc/pve/local/pveproxy-ssl.pem`
+- Private key: `/etc/pve/local/pveproxy-ssl.key`
 
 Example:
 
@@ -97,9 +102,10 @@ Example:
   listen_port: 443
   target_host: 192.168.100.102
   target_port: 80
-  tls_cert_file: /etc/letsencrypt/live/app.example.com/fullchain.pem
-  tls_key_file: /etc/letsencrypt/live/app.example.com/privkey.pem
+  tls: true
 ```
+
+If you do not want to use the Proxmox certificate, set `tls_cert_file` and `tls_key_file` to custom paths on that rule.
 
 TLS termination is only supported for TCP rules. The backend service does not need HTTPS in this setup.
 

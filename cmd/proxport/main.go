@@ -23,6 +23,9 @@ const (
 	defaultShutdownWindow = 10 * time.Second
 	defaultUDPIdleTimeout = 60 * time.Second
 	udpReadBufferSize     = 64 * 1024
+
+	defaultProxmoxTLSCertFile = "/etc/pve/local/pveproxy-ssl.pem"
+	defaultProxmoxTLSKeyFile  = "/etc/pve/local/pveproxy-ssl.key"
 )
 
 type Config struct {
@@ -37,6 +40,7 @@ type ForwardRule struct {
 	ListenPort  int    `json:"listen_port"`
 	TargetHost  string `json:"target_host"`
 	TargetPort  int    `json:"target_port"`
+	TLSEnabled  bool   `json:"tls"`
 	TLSCertFile string `json:"tls_cert_file"`
 	TLSKeyFile  string `json:"tls_key_file"`
 }
@@ -285,6 +289,12 @@ func assignForwardField(rule *ForwardRule, key, value string, lineNumber int) er
 			return fmt.Errorf("line %d: invalid target_port %q", lineNumber, value)
 		}
 		rule.TargetPort = port
+	case "tls":
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("line %d: invalid tls %q", lineNumber, value)
+		}
+		rule.TLSEnabled = enabled
 	case "tls_cert_file":
 		rule.TLSCertFile = value
 	case "tls_key_file":
@@ -331,13 +341,14 @@ func validateConfig(cfg *Config) error {
 		if rule.hasTLS() && rule.Protocol != "tcp" {
 			return fmt.Errorf("forwards[%d] uses TLS termination, which is only supported for tcp rules", i)
 		}
-		if rule.TLSCertFile != "" && rule.TLSKeyFile == "" {
-			return fmt.Errorf("forwards[%d].tls_key_file is required when tls_cert_file is set", i)
+		if rule.hasTLS() {
+			if rule.TLSCertFile == "" {
+				rule.TLSCertFile = defaultProxmoxTLSCertFile
+			}
+			if rule.TLSKeyFile == "" {
+				rule.TLSKeyFile = defaultProxmoxTLSKeyFile
+			}
 		}
-		if rule.TLSKeyFile != "" && rule.TLSCertFile == "" {
-			return fmt.Errorf("forwards[%d].tls_cert_file is required when tls_key_file is set", i)
-		}
-
 		portKey := fmt.Sprintf("%s:%d", rule.Protocol, rule.ListenPort)
 		if previous, exists := usedPorts[portKey]; exists {
 			return fmt.Errorf("%s listen_port %d is used by both %q and %q", rule.Protocol, rule.ListenPort, previous, rule.Name)
@@ -651,7 +662,7 @@ func normalizedProtocol(value string) string {
 }
 
 func (rule ForwardRule) hasTLS() bool {
-	return rule.TLSCertFile != "" || rule.TLSKeyFile != ""
+	return rule.TLSEnabled || rule.TLSCertFile != "" || rule.TLSKeyFile != ""
 }
 
 func targetAddress(rule ForwardRule) string {
