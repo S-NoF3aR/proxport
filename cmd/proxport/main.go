@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -23,6 +24,7 @@ const (
 	defaultShutdownWindow = 10 * time.Second
 	defaultUDPIdleTimeout = 60 * time.Second
 	udpReadBufferSize     = 64 * 1024
+	maxHTTPHeaderSize     = 32 * 1024
 
 	defaultProxmoxTLSCertFile = "/etc/pve/local/pveproxy-ssl.pem"
 	defaultProxmoxTLSKeyFile  = "/etc/pve/local/pveproxy-ssl.key"
@@ -40,6 +42,7 @@ type ForwardRule struct {
 	ListenPort  int    `json:"listen_port"`
 	TargetHost  string `json:"target_host"`
 	TargetPort  int    `json:"target_port"`
+	Host        string `json:"host"`
 	TLSEnabled  bool   `json:"tls"`
 	TLSCertFile string `json:"tls_cert_file"`
 	TLSKeyFile  string `json:"tls_key_file"`
@@ -289,6 +292,8 @@ func assignForwardField(rule *ForwardRule, key, value string, lineNumber int) er
 			return fmt.Errorf("line %d: invalid target_port %q", lineNumber, value)
 		}
 		rule.TargetPort = port
+	case "host":
+		rule.Host = normalizeHost(value)
 	case "tls":
 		enabled, err := strconv.ParseBool(value)
 		if err != nil {
@@ -338,8 +343,12 @@ func validateConfig(cfg *Config) error {
 		if net.ParseIP(rule.TargetHost) == nil {
 			return fmt.Errorf("forwards[%d].target_host must be a valid IP address", i)
 		}
+		rule.Host = normalizeHost(rule.Host)
 		if rule.hasTLS() && rule.Protocol != "tcp" {
 			return fmt.Errorf("forwards[%d] uses TLS termination, which is only supported for tcp rules", i)
+		}
+		if rule.Host != "" && rule.Protocol != "tcp" {
+			return fmt.Errorf("forwards[%d].host filtering is only supported for tcp rules", i)
 		}
 		if rule.hasTLS() {
 			if rule.TLSCertFile == "" {
@@ -438,6 +447,12 @@ func (a *App) listenTCP(rule ForwardRule, addr string) (net.Listener, error) {
 	return tls.Listen("tcp", addr, &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS12,
+		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			if rule.Host == "" || hello.ServerName == "" || hostsMatch(rule.Host, hello.ServerName) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("TLS SNI %q does not match configured host %q", hello.ServerName, rule.Host)
+		},
 	})
 }
 
@@ -527,6 +542,11 @@ func (a *App) serveUDPListener(ctx context.Context, conn net.PacketConn, rule Fo
 func (a *App) handleTCPConnection(client net.Conn, rule ForwardRule) {
 	defer client.Close()
 
+	initialPayload, ok := a.readInitialPayload(client, rule)
+	if !ok {
+		return
+	}
+
 	target := targetAddress(rule)
 	upstream, err := net.DialTimeout("tcp", target, a.cfg.DialTimeout.Duration)
 	if err != nil {
@@ -536,6 +556,15 @@ func (a *App) handleTCPConnection(client net.Conn, rule ForwardRule) {
 	defer upstream.Close()
 
 	a.logger.Printf("%q connected %s -> %s", displayName(rule), client.RemoteAddr(), target)
+
+	if len(initialPayload) > 0 {
+		_ = upstream.SetWriteDeadline(time.Now().Add(a.cfg.DialTimeout.Duration))
+		if _, err := upstream.Write(initialPayload); err != nil {
+			a.logger.Printf("initial write failed for %q to %s: %v", displayName(rule), target, err)
+			return
+		}
+		_ = upstream.SetWriteDeadline(time.Time{})
+	}
 
 	var copyWG sync.WaitGroup
 	copyWG.Add(2)
@@ -554,6 +583,35 @@ func (a *App) handleTCPConnection(client net.Conn, rule ForwardRule) {
 
 	copyWG.Wait()
 	a.logger.Printf("%q disconnected %s", displayName(rule), client.RemoteAddr())
+}
+
+func (a *App) readInitialPayload(client net.Conn, rule ForwardRule) ([]byte, bool) {
+	if rule.Host == "" {
+		return nil, true
+	}
+
+	if tlsConn, ok := client.(*tls.Conn); ok {
+		_ = tlsConn.SetDeadline(time.Now().Add(a.cfg.DialTimeout.Duration))
+		if err := tlsConn.Handshake(); err != nil {
+			a.logger.Printf("TLS handshake failed for %q from %s: %v", displayName(rule), client.RemoteAddr(), err)
+			return nil, false
+		}
+		_ = tlsConn.SetDeadline(time.Time{})
+	}
+
+	header, err := readHTTPHeader(client, a.cfg.DialTimeout.Duration)
+	if err != nil {
+		a.logger.Printf("host filter read failed for %q from %s: %v", displayName(rule), client.RemoteAddr(), err)
+		return nil, false
+	}
+
+	requestHost := parseHTTPHost(header)
+	if requestHost == "" || !hostsMatch(rule.Host, requestHost) {
+		a.logger.Printf("host filter rejected %q from %s: got %q, want %q", displayName(rule), client.RemoteAddr(), requestHost, rule.Host)
+		return nil, false
+	}
+
+	return header, true
 }
 
 func (a *App) getOrCreateUDPSession(
@@ -661,12 +719,71 @@ func normalizedProtocol(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
 }
 
+func normalizeHost(value string) string {
+	host := strings.TrimSpace(strings.ToLower(value))
+	if host == "" {
+		return ""
+	}
+
+	if strings.Contains(host, "://") {
+		withoutScheme := strings.SplitN(host, "://", 2)[1]
+		host = strings.SplitN(withoutScheme, "/", 2)[0]
+	}
+
+	if splitHost, _, err := net.SplitHostPort(host); err == nil {
+		return strings.Trim(splitHost, "[]")
+	}
+
+	return strings.Trim(host, "[]")
+}
+
 func (rule ForwardRule) hasTLS() bool {
 	return rule.TLSEnabled || rule.TLSCertFile != "" || rule.TLSKeyFile != ""
 }
 
 func targetAddress(rule ForwardRule) string {
 	return net.JoinHostPort(rule.TargetHost, strconv.Itoa(rule.TargetPort))
+}
+
+func readHTTPHeader(conn net.Conn, timeout time.Duration) ([]byte, error) {
+	var header []byte
+	buffer := make([]byte, 1024)
+
+	_ = conn.SetReadDeadline(time.Now().Add(timeout))
+	defer conn.SetReadDeadline(time.Time{})
+
+	for {
+		n, err := conn.Read(buffer)
+		if n > 0 {
+			header = append(header, buffer[:n]...)
+			if bytes.Contains(header, []byte("\r\n\r\n")) || bytes.Contains(header, []byte("\n\n")) {
+				return header, nil
+			}
+			if len(header) > maxHTTPHeaderSize {
+				return nil, fmt.Errorf("HTTP header exceeds %d bytes", maxHTTPHeaderSize)
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+}
+
+func parseHTTPHost(header []byte) string {
+	lines := strings.Split(string(header), "\n")
+	for _, line := range lines {
+		line = strings.TrimRight(line, "\r")
+		key, value, ok := strings.Cut(line, ":")
+		if !ok || !strings.EqualFold(strings.TrimSpace(key), "host") {
+			continue
+		}
+		return normalizeHost(value)
+	}
+	return ""
+}
+
+func hostsMatch(expected, actual string) bool {
+	return normalizeHost(expected) == normalizeHost(actual)
 }
 
 func isClosedNetworkError(err error) bool {

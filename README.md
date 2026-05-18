@@ -64,6 +64,7 @@ forwards:
     listen_port: 443
     target_host: 192.168.100.102
     target_port: 80
+    host: app.example.com
     tls: true
   - name: game-vm-103
     protocol: udp
@@ -81,9 +82,28 @@ Fields:
 - `forwards[].listen_port`: Public port opened on the Proxmox host
 - `forwards[].target_host`: VM IP address reachable from the host
 - `forwards[].target_port`: Port on the VM service
+- `forwards[].host`: Optional HTTP/HTTPS hostname filter for TCP rules
 - `forwards[].tls`: Enables TLS termination on TCP rules
 - `forwards[].tls_cert_file`: Optional certificate chain override for TLS termination on TCP rules
 - `forwards[].tls_key_file`: Optional private key override for TLS termination on TCP rules
+
+## Host filtering
+
+Set `host` on a TCP rule to accept only HTTP or HTTPS traffic for that hostname. For TLS rules, proxport checks SNI during the handshake and the HTTP `Host` header after TLS termination. For plain TCP rules, proxport checks the HTTP `Host` header before forwarding the request to the VM.
+
+Example:
+
+```yaml
+- name: app-https
+  protocol: tcp
+  listen_port: 443
+  target_host: 192.168.100.102
+  target_port: 80
+  host: app.example.com
+  tls: true
+```
+
+The filter matches hostnames only. It does not route by path, and it is not suitable for non-HTTP TCP services such as SSH.
 
 ## TLS termination
 
@@ -102,6 +122,7 @@ Example:
   listen_port: 443
   target_host: 192.168.100.102
   target_port: 80
+  host: app.example.com
   tls: true
 ```
 
